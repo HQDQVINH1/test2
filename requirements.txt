@@ -1,14 +1,6 @@
-# requirements.txt
-
-# Ứng dụng web
-streamlit
-
-# Xử lý dữ liệu
-pandas
-numpy
-
-# Gọi Gemini (Google Generative AI)
-google-genai
-
-# Đọc file Word (.docx)
-python-docx
+# --- Pinned (ổn định) ---
+streamlit==1.38.0
+pandas==2.2.3
+numpy==1.26.4          # cặp ổn định với pandas 2.2.x trên nhiều môi trường
+google-genai==0.6.0
+python-docx==1.1.2
