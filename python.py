@@ -15,6 +15,9 @@ from docx import Document
 # =========================
 st.set_page_config(page_title="Đánh giá Phương án Kinh doanh (DOCX) 📄➡️📊", layout="wide")
 st.title("Đánh giá Phương án Kinh doanh từ file Word 📄➡️📊")
+# Khởi tạo vùng lưu kết quả để dùng sau rerun
+if "analysis_ctx" not in st.session_state:
+    st.session_state.analysis_ctx = None
 
 st.caption(
     "Upload file Word (.docx) chứa phương án kinh doanh. Ấn **Lọc dữ liệu với AI** để trích xuất: "
@@ -374,6 +377,94 @@ Giải thích:
 
         except Exception as e:
             st.error(f"Lỗi khi tạo bảng dòng tiền / tính chỉ số: {e}")
+# LƯU KẾT QUẢ VÀO SESSION để dùng cho nút AI phân tích ở lần rerun tiếp theo
+st.session_state.analysis_ctx = {
+    "investment": float(investment),
+    "lifetime_years": int(lifetime_years),
+    "revenue_per_year": float(revenue_per_year),
+    "cost_per_year": float(cost_per_year),
+    "tax_rate": float(tax_rate),
+    "wacc": float(wacc),
+    "npv": float(npv),
+    "irr": None if irr is None else float(irr),
+    "pp": pp,
+    "dpp": dpp,
+    # có thể lưu thêm cashflows nếu cần
+}
+st.success("Đã lưu kết quả. Bạn có thể cuộn xuống để yêu cầu AI phân tích bất cứ lúc nào.")
+
+# =========================
+# 6) PHÂN TÍCH HIỆU QUẢ DỰ ÁN BẰNG AI (ĐỘC LẬP VỚI FORM)
+# =========================
+st.subheader("6) Phân tích hiệu quả dự án bằng AI")
+
+ctx = st.session_state.analysis_ctx
+if not ctx:
+    st.info("Chưa có dữ liệu để phân tích. Hãy điền thông số và bấm “Tạo bảng dòng tiền & Tính chỉ số”.")
+else:
+    # Chuẩn bị prompt từ session_state
+    irr_text = "N/A" if ctx["irr"] is None else f"{ctx['irr']*100:.2f}%"
+    pp_text = "Không hoàn vốn" if ctx["pp"] is None else f"{ctx['pp']:.2f} năm"
+    dpp_text = "Không hoàn vốn" if ctx["dpp"] is None else f"{ctx['dpp']:.2f} năm"
+
+    analysis_prompt = f"""
+Bạn là chuyên gia thẩm định dự án. Hãy phân tích ngắn gọn, súc tích (≤4 đoạn),
+trọng tâm vào NPV, IRR, PP, DPP, mức độ hấp dẫn so với WACC, và rủi ro chính.
+
+Thông số:
+- Vốn đầu tư: {ctx['investment']:,.0f} đ
+- Vòng đời: {ctx['lifetime_years']} năm
+- Doanh thu/năm: {ctx['revenue_per_year']:,.0f} đ
+- Chi phí/năm: {ctx['cost_per_year']:,.0f} đ
+- Thuế suất: {ctx['tax_rate']:.2f}
+- WACC: {ctx['wacc']:.3f}
+
+Kết quả:
+- NPV: {ctx['npv']:,.0f} đ
+- IRR: {irr_text}
+- PP: {pp_text}
+- DPP: {dpp_text}
+
+Yêu cầu:
+- Diễn giải ý nghĩa từng chỉ số trong bối cảnh trên
+- So sánh IRR với WACC (nếu IRR > WACC → có thể hấp dẫn)
+- Nhận xét khi NPV ~ 0
+- Chỉ ra rủi ro và gợi ý kiểm tra độ nhạy
+""".strip()
+
+    # Nút phân tích AI (độc lập)
+    if st.button("🧠 Yêu cầu AI phân tích", key="btn_ai_analyze"):
+        api_key = st.secrets.get("GEMINI_API_KEY")
+        if not api_key:
+            st.error("Thiếu GEMINI_API_KEY trong Secrets.")
+        else:
+            try:
+                client = genai.Client(api_key=api_key)
+                # Bạn có thể chọn model phù hợp quota của bạn
+                model_name = "gemini-2.5-flash"
+                with st.spinner("AI đang phân tích..."):
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=analysis_prompt
+                    )
+                    # Một số bản SDK trả về .text, một số trả về candidates
+                    ai_text = getattr(resp, "text", None)
+                    if not ai_text:
+                        # fallback an toàn
+                        try:
+                            ai_text = resp.candidates[0].content.parts[0].text
+                        except Exception:
+                            ai_text = None
+
+                    if ai_text:
+                        st.markdown("**Kết quả phân tích từ AI:**")
+                        st.info(ai_text)
+                    else:
+                        st.warning("Không lấy được nội dung phản hồi từ AI. Hãy thử lại.")
+            except APIError as e:
+                st.error(f"Lỗi gọi Gemini API: {e}")
+            except Exception as e:
+                st.error(f"Đã xảy ra lỗi khi gọi AI: {e}")
 
 # =========================
 # GỢI Ý MỞ RỘNG
