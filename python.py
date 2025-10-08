@@ -15,14 +15,19 @@ from docx import Document
 # =========================
 st.set_page_config(page_title="Đánh giá Phương án Kinh doanh (DOCX) 📄➡️📊", layout="wide")
 st.title("Đánh giá Phương án Kinh doanh từ file Word 📄➡️📊")
-# Khởi tạo vùng lưu kết quả để dùng sau rerun
-if "analysis_ctx" not in st.session_state:
-    st.session_state.analysis_ctx = None
 
 st.caption(
     "Upload file Word (.docx) chứa phương án kinh doanh. Ấn **Lọc dữ liệu với AI** để trích xuất: "
-    "Vốn đầu tư, Vòng đời, Doanh thu, Chi phí, WACC, Thuế. Có thể chỉnh tay sau khi AI trích xuất."
+    "Vốn đầu tư, Vòng đời, Doanh thu/năm, Chi phí/năm, WACC, Thuế. Có thể chỉnh tay sau khi AI trích xuất, "
+    "sau đó bấm **Tạo bảng dòng tiền & Tính chỉ số**. Cuối cùng dùng **🧠 Yêu cầu AI phân tích**."
 )
+
+# =========================
+# SESSION STATE
+# =========================
+# Lưu kết quả tính toán để không mất khi Streamlit rerun sau khi bấm nút
+if "analysis_ctx" not in st.session_state:
+    st.session_state.analysis_ctx = None
 
 # =========================
 # TIỆN ÍCH
@@ -34,20 +39,17 @@ def read_docx_text(file_bytes: bytes) -> str:
     return "\n".join(paras)
 
 def safe_json_loads(s: str):
-    """Parse JSON an toàn, tự sửa một số lỗi phổ biến."""
+    """Parse JSON an toàn, tự sửa một số lỗi phổ biến do model trả về."""
     try:
         return json.loads(s)
     except Exception:
-        # Thử cắt phần mở đầu/kết thúc nếu model trả thêm text
         s2 = s.strip()
-        # Loại bỏ code fences nếu có
         if s2.startswith("```"):
+            # loại bỏ code fence
             s2 = s2.strip("`")
-            # loại bỏ gợi ý loại ngôn ngữ
             if s2.startswith("json"):
                 s2 = s2[4:]
         s2 = s2.strip()
-        # Cố đóng ngoặc nếu thiếu
         if s2 and s2[-1] != "}":
             s2 += "}"
         try:
@@ -56,7 +58,7 @@ def safe_json_loads(s: str):
             return None
 
 def parse_numbers(d, key, default=None):
-    """Ép kiểu số từ dict với key (chấp nhận %, , . và khoảng trắng)."""
+    """Ép kiểu số với key (chấp nhận %, , . và khoảng trắng)."""
     try:
         val = d.get(key, None)
         if val is None or (isinstance(val, str) and not val.strip()):
@@ -64,7 +66,6 @@ def parse_numbers(d, key, default=None):
         if isinstance(val, (int, float)):
             return float(val)
         s = str(val).replace(",", "").replace(" ", "")
-        # phần trăm
         if s.endswith("%"):
             return float(s[:-1]) / 100.0
         return float(s)
@@ -72,14 +73,11 @@ def parse_numbers(d, key, default=None):
         return default
 
 def irr_bisection(cashflows, tol=1e-6, max_iter=100):
-    """IRR bằng phương pháp chia đôi (tránh phụ thuộc numpy_financial)."""
-    # Tìm r sao cho NPV = 0
+    """Tính IRR bằng phương pháp chia đôi (không phụ thuộc numpy_financial)."""
     def npv(r):
         return sum(cf / ((1 + r) ** t) for t, cf in enumerate(cashflows))
-    # Giới hạn ban đầu
     low, high = -0.9999, 10.0
     f_low, f_high = npv(low), npv(high)
-    # Nếu cùng dấu, thử mở rộng
     tries = 0
     while f_low * f_high > 0 and tries < 5:
         high *= 2
@@ -99,20 +97,15 @@ def irr_bisection(cashflows, tol=1e-6, max_iter=100):
     return mid
 
 def payback_period(cashflows):
-    """
-    PP: năm hoàn vốn không chiết khấu (có phần thập phân).
-    cashflows[0] thường âm (đầu tư ban đầu).
-    """
+    """PP: năm hoàn vốn (không chiết khấu)."""
     cum = 0.0
     for t, cf in enumerate(cashflows):
         cum += cf
         if cum >= 0:
-            # hoàn vốn trong năm t
-            # phần còn thiếu ở đầu năm t / CF của năm t
             prev_cum = cum - cf
             need = -prev_cum
             frac = 0 if cf == 0 else need / cf
-            return t - 1 + frac  # vì t là cuối năm t; hoàn vốn giữa năm t -> t-1 + frac
+            return t - 1 + frac
     return None
 
 def discounted_payback_period(cashflows, rate):
@@ -131,9 +124,9 @@ def discounted_payback_period(cashflows, rate):
 def build_cashflow_table(investment, lifetime_years, revenue_per_year, cost_per_year, tax_rate, wacc):
     """
     Giả định:
-    - Chi đầu tư (CapEx) tại t=0: investment (âm).
-    - Dòng tiền hoạt động mỗi năm t=1..N: (Doanh thu - Chi phí) * (1 - Thuế)
-    - Không tính khấu hao/giá trị thu hồi (có thể mở rộng sau).
+    - CapEx tại t=0: investment (âm).
+    - OCF mỗi năm t=1..N: (Doanh thu - Chi phí) * (1 - Thuế).
+    - Không tính khấu hao/giá trị thu hồi (có thể mở rộng).
     """
     years = list(range(0, int(lifetime_years) + 1))
     cf = []
@@ -141,12 +134,18 @@ def build_cashflow_table(investment, lifetime_years, revenue_per_year, cost_per_
     for y in years:
         if y == 0:
             cf.append(-abs(investment))
-            detail.append({"Năm": 0, "Doanh thu": 0.0, "Chi phí": 0.0, "Lợi nhuận trước thuế": 0.0,
-                           "Thuế": 0.0, "Dòng tiền": cf[-1]})
+            detail.append({
+                "Năm": 0,
+                "Doanh thu": 0.0,
+                "Chi phí": 0.0,
+                "Lợi nhuận trước thuế": 0.0,
+                "Thuế": 0.0,
+                "Dòng tiền": cf[-1]
+            })
         else:
-            ebt = revenue_per_year - cost_per_year  # EBIT ~ EBT (giả định không lãi vay & KH)
-            tax = max(0.0, ebt) * tax_rate  # nếu lỗ thì thuế = 0
-            ocf = (ebt - tax)
+            ebt = revenue_per_year - cost_per_year
+            tax = max(0.0, ebt) * tax_rate
+            ocf = ebt - tax
             cf.append(ocf)
             detail.append({
                 "Năm": y,
@@ -156,11 +155,8 @@ def build_cashflow_table(investment, lifetime_years, revenue_per_year, cost_per_
                 "Thuế": tax,
                 "Dòng tiền": ocf
             })
-    # NPV
     npv = sum(cf[t] / ((1 + wacc) ** t) for t in range(len(cf)))
-    # IRR
     irr = irr_bisection(cf)
-    # PP & DPP
     pp = payback_period(cf)
     dpp = discounted_payback_period(cf, wacc)
 
@@ -182,7 +178,7 @@ def show_metrics(npv, irr, pp, dpp, currency="đ"):
         st.metric("DPP (chiết khấu)", format_period(dpp))
 
 # =========================
-# UPLOAD FILE
+# 1) UPLOAD FILE
 # =========================
 uploaded = st.file_uploader("1) Tải file Word (.docx) chứa phương án kinh doanh", type=["docx"])
 doc_text = None
@@ -196,11 +192,10 @@ if uploaded:
         st.error(f"Lỗi đọc file .docx: {e}")
 
 # =========================
-# AI TRÍCH XUẤT THÔNG TIN
+# 2) AI TRÍCH XUẤT THÔNG TIN
 # =========================
 st.subheader("2) Lọc dữ liệu dự án bằng AI")
-st.caption("Ấn nút dưới đây để AI trích xuất các trường: **Vốn đầu tư, Vòng đời (năm), Doanh thu/năm, Chi phí/năm, WACC, Thuế**.")
-ai_col = st.container()
+st.caption("Ấn nút để AI trích xuất: **Vốn đầu tư, Vòng đời (năm), Doanh thu/năm, Chi phí/năm, WACC, Thuế**.")
 
 default_values = {
     "investment": None,
@@ -211,7 +206,7 @@ default_values = {
     "tax_rate": None
 }
 
-if uploaded and st.button("🔎 Lọc dữ liệu với AI"):
+if uploaded and st.button("🔎 Lọc dữ liệu với AI", key="btn_extract_ai"):
     if not doc_text:
         st.error("Không đọc được nội dung file.")
     else:
@@ -224,7 +219,7 @@ if uploaded and st.button("🔎 Lọc dữ liệu với AI"):
                 model_name = "gemini-2.5-flash"
 
                 prompt = f"""
-Bạn là chuyên gia phân tích dự án. Hãy TRẢ VỀ DUY NHẤT JSON theo schema sau, dựa trên nội dung Word (tiếng Việt có thể lẫn số):
+Bạn là chuyên gia phân tích dự án. Hãy TRẢ VỀ DUY NHẤT JSON theo schema sau, dựa trên nội dung Word:
 {{
   "investment": "<Vốn đầu tư ban đầu, số>",
   "lifetime_years": "<Số năm vòng đời dự án, số nguyên>",
@@ -256,7 +251,7 @@ Nội dung Word:
                         default_values["cost_per_year"] = parse_numbers(parsed, "cost_per_year")
                         default_values["wacc"] = parse_numbers(parsed, "wacc")
                         default_values["tax_rate"] = parse_numbers(parsed, "tax_rate")
-                        st.success("Đã trích xuất xong. Bạn có thể hiệu chỉnh các giá trị bên dưới.")
+                        st.success("Đã trích xuất xong. Bạn có thể hiệu chỉnh các giá trị ở form bên dưới.")
                         if parsed.get("notes"):
                             st.info(f"AI ghi chú: {parsed.get('notes')}")
             except APIError as e:
@@ -265,7 +260,7 @@ Nội dung Word:
                 st.error(f"Lỗi không xác định khi gọi AI: {e}")
 
 # =========================
-# FORM THÔNG SỐ (CHO PHÉP HIỆU CHỈNH)
+# 3) FORM THÔNG SỐ (CHO PHÉP HIỆU CHỈNH)
 # =========================
 st.subheader("3) Kiểm tra & hiệu chỉnh thông số")
 with st.form("inputs"):
@@ -282,13 +277,14 @@ with st.form("inputs"):
 
     agree_assumption = st.checkbox(
         "Giả định đơn giản hóa: Dòng tiền hoạt động = (Doanh thu - Chi phí) × (1 - Thuế). "
-        "Không tính khấu hao/giá trị thu hồi.", value=True
+        "Không tính khấu hao/giá trị thu hồi.",
+        value=True
     )
 
     submitted = st.form_submit_button("🚀 Tạo bảng dòng tiền & Tính chỉ số")
 
 # =========================
-# LẬP BẢNG DÒNG TIỀN + CHỈ SỐ
+# 4 & 5) LẬP BẢNG DÒNG TIỀN + CHỈ SỐ (KHI SUBMIT)
 # =========================
 if submitted:
     if not agree_assumption:
@@ -330,71 +326,25 @@ if submitted:
                     "cashflows": cashflows
                 })
 
-            # =========================
-            # PHÂN TÍCH AI CÁC CHỈ SỐ
-            # =========================
-            st.subheader("6) Phân tích hiệu quả dự án bằng AI")
-            analysis_prompt = f"""
-Bạn là chuyên gia thẩm định dự án. Hãy phân tích ngắn gọn, súc tích (tối đa ~4 đoạn),
-trọng tâm vào NPV, IRR, PP, DPP, mức độ hấp dẫn so với WACC, và rủi ro chính.
-
-Thông số:
-- Vốn đầu tư: {investment:,.0f} đ
-- Vòng đời: {lifetime_years} năm
-- Doanh thu/năm: {revenue_per_year:,.0f} đ
-- Chi phí/năm: {cost_per_year:,.0f} đ
-- Thuế suất: {tax_rate:.2f}
-- WACC: {wacc:.3f}
-
-Kết quả:
-- NPV: {npv:,.0f} đ
-- IRR: {"N/A" if irr is None else f"{irr*100:.2f}%"}
-- PP: {"Không hoàn vốn" if pp is None else f"{pp:.2f} năm"}
-- DPP: {"Không hoàn vốn" if dpp is None else f"{dpp:.2f} năm"}
-
-Giải thích:
-- Ý nghĩa từng chỉ số với bối cảnh dự án.
-- So sánh IRR với WACC (nếu IRR > WACC thì dự án có thể hấp dẫn).
-- Nhận xét về độ an toàn khi NPV ~ 0.
-- Nêu các rủi ro (độ nhạy doanh thu/chi phí, rủi ro lãi suất, thời gian đạt điểm hòa vốn).
-"""
-            if st.button("🧠 Yêu cầu AI phân tích"):
-                api_key = st.secrets.get("GEMINI_API_KEY", None)
-                if not api_key:
-                    st.error("Thiếu GEMINI_API_KEY trong Secrets.")
-                else:
-                    try:
-                        client = genai.Client(api_key=api_key)
-                        model_name = "gemini-2.5-flash"
-                        with st.spinner("AI đang phân tích..."):
-                            resp = client.models.generate_content(model=model_name, contents=analysis_prompt)
-                            st.markdown("**Kết quả phân tích từ AI:**")
-                            st.info(resp.text)
-                    except APIError as e:
-                        st.error(f"Lỗi gọi Gemini API: {e}")
-                    except Exception as e:
-                        st.error(f"Lỗi không xác định khi gọi AI: {e}")
-
+            # LƯU KẾT QUẢ VÀO SESSION để nút AI phân tích dùng được sau rerun
+            st.session_state.analysis_ctx = {
+                "investment": float(investment),
+                "lifetime_years": int(lifetime_years),
+                "revenue_per_year": float(revenue_per_year),
+                "cost_per_year": float(cost_per_year),
+                "tax_rate": float(tax_rate),
+                "wacc": float(wacc),
+                "npv": float(npv),
+                "irr": None if irr is None else float(irr),
+                "pp": pp,
+                "dpp": dpp,
+            }
+            st.success("Đã lưu kết quả. Kéo xuống để yêu cầu AI phân tích bất cứ lúc nào.")
         except Exception as e:
             st.error(f"Lỗi khi tạo bảng dòng tiền / tính chỉ số: {e}")
-# LƯU KẾT QUẢ VÀO SESSION để dùng cho nút AI phân tích ở lần rerun tiếp theo
-st.session_state.analysis_ctx = {
-    "investment": float(investment),
-    "lifetime_years": int(lifetime_years),
-    "revenue_per_year": float(revenue_per_year),
-    "cost_per_year": float(cost_per_year),
-    "tax_rate": float(tax_rate),
-    "wacc": float(wacc),
-    "npv": float(npv),
-    "irr": None if irr is None else float(irr),
-    "pp": pp,
-    "dpp": dpp,
-    # có thể lưu thêm cashflows nếu cần
-}
-st.success("Đã lưu kết quả. Bạn có thể cuộn xuống để yêu cầu AI phân tích bất cứ lúc nào.")
 
 # =========================
-# 6) PHÂN TÍCH HIỆU QUẢ DỰ ÁN BẰNG AI (ĐỘC LẬP VỚI FORM)
+# 6) PHÂN TÍCH HIỆU QUẢ DỰ ÁN BẰNG AI (ĐỘC LẬP)
 # =========================
 st.subheader("6) Phân tích hiệu quả dự án bằng AI")
 
@@ -402,7 +352,6 @@ ctx = st.session_state.analysis_ctx
 if not ctx:
     st.info("Chưa có dữ liệu để phân tích. Hãy điền thông số và bấm “Tạo bảng dòng tiền & Tính chỉ số”.")
 else:
-    # Chuẩn bị prompt từ session_state
     irr_text = "N/A" if ctx["irr"] is None else f"{ctx['irr']*100:.2f}%"
     pp_text = "Không hoàn vốn" if ctx["pp"] is None else f"{ctx['pp']:.2f} năm"
     dpp_text = "Không hoàn vốn" if ctx["dpp"] is None else f"{ctx['dpp']:.2f} năm"
@@ -432,7 +381,6 @@ Yêu cầu:
 - Chỉ ra rủi ro và gợi ý kiểm tra độ nhạy
 """.strip()
 
-    # Nút phân tích AI (độc lập)
     if st.button("🧠 Yêu cầu AI phân tích", key="btn_ai_analyze"):
         api_key = st.secrets.get("GEMINI_API_KEY")
         if not api_key:
@@ -440,17 +388,14 @@ Yêu cầu:
         else:
             try:
                 client = genai.Client(api_key=api_key)
-                # Bạn có thể chọn model phù hợp quota của bạn
                 model_name = "gemini-2.5-flash"
                 with st.spinner("AI đang phân tích..."):
                     resp = client.models.generate_content(
                         model=model_name,
                         contents=analysis_prompt
                     )
-                    # Một số bản SDK trả về .text, một số trả về candidates
                     ai_text = getattr(resp, "text", None)
                     if not ai_text:
-                        # fallback an toàn
                         try:
                             ai_text = resp.candidates[0].content.parts[0].text
                         except Exception:
@@ -471,7 +416,7 @@ Yêu cầu:
 # =========================
 with st.expander("⚙️ Gợi ý mở rộng (tùy chọn)"):
     st.markdown("""
-- Thêm **khấu hao** theo phương pháp đường thẳng → ảnh hưởng thuế nhưng không ảnh hưởng dòng tiền (chỉ khi tính lợi nhuận).
+- Thêm **khấu hao** theo đường thẳng → ảnh hưởng thuế nhưng không ảnh hưởng dòng tiền trực tiếp.
 - Thêm **giá trị thu hồi (salvage)** ở năm cuối.
 - Cho phép **kịch bản**: lạc quan/cơ sở/bi quan cho Doanh thu & Chi phí.
 - Thêm **phân tích độ nhạy** (WACC ±, Doanh thu ±, Chi phí ±).
