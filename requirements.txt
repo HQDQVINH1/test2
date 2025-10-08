@@ -3,8 +3,9 @@
 # Ứng dụng web
 streamlit
 
-# Xử lý dữ liệu (kéo theo numpy như một dependency)
+# Xử lý dữ liệu
 pandas
+numpy
 
 # Gọi Gemini (Google Generative AI)
 google-genai
